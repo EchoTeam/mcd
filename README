@@ -15,7 +15,7 @@ addressable by the returned pid().
 
 	mcd:start_link(["localhost", 11211]).
 
-The next onewill connect to the memcached server on the local host,
+The next one will connect to the memcached server on the local host,
 and will also register the mcd instance under the 'myMcd' name. See 3.
 The mcd API can use the returned pid() and the registered name interchangeably.
 
