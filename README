@@ -47,7 +47,7 @@ of memcached servers in a consistent hashing mode. This is described in #2.
 	{ok, [42]} = mcd:set(mainCluster, <<"bar">>, [42]).
 	{ok, [42]} = mcd:get(mainCluster, <<"bar">>).
 
-By convention, you can omit specifying 'localmcd' (see 1.1):
+By convention, you can omit specifying 'localmcd' (see 1.2):
 
 	{ok, alive} = mcd:set(self(), alive).
 	{ok, alive} = mcd:get(self()).
