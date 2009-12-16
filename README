@@ -1,0 +1,54 @@
+
+		Erlang memcached client library.
+
+This library provides two ways of working with memcached servers. One way
+is to use a single server, as described in #1. Another way is to use a number
+of memcached servers in a consistent hashing mode. This is described in #2.
+
+
+1. RUNNING IN SINGLE-SERVER MODE
+
+1.1  Starting a single memcached
+
+	mcd:start_link(["localhost", 11211]).
+    or
+	unlink(element(2, mcd:start_link(mcd, [])))
+
+1.2  A ChildSpec for running the mcd named 'localmcd' under a supervisor
+
+	{ localmcd, { localmcd, start_link, [localmcd, ["localhost", 11211] ] },
+	permanent, 10000, worker, [mcd, dht_ring] }
+
+
+2. RUNNING IN CLUSTERED MODE
+
+   mcd_starter starts a set of of memcached instances and mcd_cluster
+   dispatcher attached to them. All memcached instances and mcd_cluster
+   are linked to this gen_server, so a proper exit hierarchy is formed.
+
+2.1  Starting memcached cluster from the command line (e.g., for testing)
+
+	mcd_starter:start_link(mainCluster,
+		[ ["remoteHost1", 11211], ["remoteHost2", 1890] ]).
+
+2.2  A ChildSpec for running the cluster named 'mainCluster' under a supervisor
+
+	{ mainCluster, { mcd_starter, start_link, [mainCluster, [
+			["remoteHost1"],
+			["remoteHost2", 1890] ] },
+		permanent, infinity, supervisor, [mcd_starter] }
+
+     Note: the default port for "remoteHost1" is 11211.
+
+3. USING MEMCACHED
+
+	{ok, b} = mcd:set(localmcd, a, b).
+	{error, notfound} = mcd:get(localmcd, foo).
+	{ok, [42]} = mcd:set(mainCluster, <<"bar">>, [42]).
+	{ok, [42]} = mcd:get(mainCluster, <<"bar">>).
+
+By convention, you can omit specifying 'localmcd' (see 1.1):
+
+	{ok, alive} = mcd:set(self(), alive).
+	{ok, alive} = mcd:get(self()).
+
