@@ -423,7 +423,7 @@ reconnector_process(MCDServerPid, Address, Port) ->
 
 % Remove all the requests from the queue, and report errors to originators.
 flushRequestsQueue([]) -> ok;
-flushRequestsQueue([{_ReqId, From, _}|Objects]) ->
+flushRequestsQueue([{_ReqId, From, _, _}|Objects]) ->
 	replyBack(From, {error, flushed}),
 	flushRequestsQueue(Objects);
 flushRequestsQueue(Tab) ->
