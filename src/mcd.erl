@@ -187,10 +187,9 @@ monitor(ServerRef, MonitorPid, MonitorItem) when is_atom(MonitorItem) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 -record(state, { address, port = 11211, socket = nosocket,
-	reqQ,			% queue to match responses with requests
-	cont = nocont,		% current expectation continuation
-	requests = 0,		% client requests initiated
-	replies = 0,		% server replies received
+	receiver,		% data receiver process
+	requests = 0,		% client requests received
+	outstanding = 0,	% client requests outstanding
 	anomalies = {0, 0, 0},	% {queue overloads, reconnects, unused}
 	status = disabled,	% connection status:
 				%   disabled | ready
@@ -205,18 +204,23 @@ init([Address, Port]) ->
 	{ ok, reconnect(#state{
 			address = Address,
 			port = Port,
-			reqQ = ets:new(memcached_queue, [set, private])
+			receiver = start_data_receiver(self())
 		})
 	}.
 
-handle_call(info, _From, State) ->
-	#state{requests = QIN, replies = QOUT, anomalies = {QOV, REC, _},
+start_data_receiver(Parent) ->
+	spawn_monitor(fun() ->
+		ParentMon = erlang:monitor(process, Parent),
+		data_receiver_loop(Parent, ParentMon, undefined)
+	end).
+
+handle_call(status, _From, State) ->
+	#state{requests = QTotal, outstanding = QOut, anomalies = {QOV, REC, _},
 		status = Status} = State,
 	{reply,
-		[{requests, QIN}, {replies, QOUT}, {overloads, QOV},
+		[{requests, QTotal}, {outstanding, QOut}, {overloads, QOV},
 		{reconnects, REC}, {status, Status}],
 	State};
-
 handle_call({set_monitor, MonitorPid, Items}, _From, #state{monitored_by=CurMons} = State) ->
 	MonRef = erlang:monitor(process, MonitorPid),
 	NewMons = addMonitorPidItems(demonitorPid(CurMons, MonitorPid),
@@ -238,15 +242,20 @@ handle_cast({connected, Pid, nosocket},
 	{noreply, State#state { status = {wait, Since} }};
 handle_cast({connected, Pid, NewSocket},
 		#state{socket = nosocket,
+			receiver = {RcvrPid, _},
 			status = {connecting, _, {Pid,_}}} = State) ->
+
+	RcvrPid ! {switch_receiving_socket, self(), NewSocket},
 
 	{Since, ReconnectDelay} = compute_next_reconnect_delay(State),
 
 	ReqId = State#state.requests,
 
 	% We ask for version information, which will set our status to ready
-	{Socket, NewStatus} = case constructAndSendQuery(anon, {version},
-				NewSocket, State#state.reqQ, ReqId) of
+	{Socket, NewStatus} = case constructAndSendQuery(
+				{self(), {connection_tested, NewSocket}},
+				{version},
+				NewSocket, State#state.receiver) of
 		ok -> {NewSocket, {testing, Since}};
 		{ error, _ } ->
 			gen_tcp:close(NewSocket),
@@ -259,7 +268,7 @@ handle_cast({connected, Pid, NewSocket},
 	{noreply, State#state { socket = Socket,
 		status = NewStatus,
 		requests = ReqId + 1,
-		replies = ReqId
+		outstanding = 1
 		}};
 
 handle_cast({connected, _, nosocket}, State) -> {noreply, State};
@@ -268,20 +277,25 @@ handle_cast({connected, _, Socket}, State) ->
 	{noreply, State};
 handle_cast(Query, State) -> {noreply, scheduleQuery(State, Query, anon)}.
 
+handle_info({request_served, Socket}, #state{socket=Socket, outstanding=QOut}=State) -> {noreply, State#state{outstanding=QOut - 1}};
+handle_info({{connection_tested, Socket}, {ok, _Version}}, #state{socket = Socket, status = {testing, _}} = State) ->
+	{noreply, State#state{status = ready}};
 handle_info({timeout, _, {may, reconnect}}, State) -> {noreply, reconnect(State)};
 handle_info({tcp_closed, Socket}, #state{socket = Socket} = State) ->
 	{noreply, reconnect(State#state{socket = nosocket})};
-handle_info({tcp, Socket, Data}, #state{socket = Socket} = State) ->
-	{noreply, handleMemcachedServerResponse(Data, State)};
 handle_info({'DOWN', MonRef, process, Pid, _Info}, #state{status={connecting,_,{Pid,MonRef}}}=State) ->
 	error_logger:info_msg("Memcached connector died (~p),"
 			" simulating nosock~n", [_Info]),
 	handle_cast({connected, Pid, nosocket}, State);
+handle_info({'DOWN', MonRef, process, Pid, _Info}, #state{receiver={Pid,MonRef}}=State) ->
+	{stop, {receiver_down, _Info}, State};
 handle_info({'DOWN', MonRef, process, Pid, _Info}, #state{monitored_by=Mons}=State) ->
 	{noreply, State#state{
 		monitored_by = removeMonitorPidAndMonRef(Mons, Pid, MonRef)
 		} };
-handle_info(_Info, State) -> {noreply, State}.
+handle_info(_Info, State) ->
+	io:format("Some info: ~p~n", [_Info]),
+	{noreply, State}.
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 terminate(_Reason, _State) -> ok.
@@ -363,20 +377,14 @@ reconnect(#state{address = Address, port = Port, socket = OldSock} = State) ->
 		_ -> gen_tcp:close(OldSock)
 	end,
 
-        % XXX: report an error and terminate if we can't connect for too
-        % long?
-
 	Self = self(),
 	{Pid,MRef} = spawn_monitor(fun() ->
 			reconnector_process(Self, Address, Port) end),
 
 	% We want to reconnect but we can't do it immediately, since
-	% the tcp connection could be failing right after connection.
+	% the tcp connection could be failing right after connection attempt.
 	% So let it cook for a period of time before the next retry.
 	{Since, _ReconnectDelay} = compute_next_reconnect_delay(State),
-
-	% Remove everything from the queue and report errors to requesters.
-	flushRequestsQueue(State#state.reqQ),
 
 	NewAnomalies = case is_atom(State#state.status) of
 		false -> State#state.anomalies;
@@ -386,9 +394,8 @@ reconnect(#state{address = Address, port = Port, socket = OldSock} = State) ->
 	end,
 
 	State#state { socket = nosocket,
-		cont = nocont,
 		status = {connecting, Since, {Pid, MRef}},
-		replies = State#state.requests,	% Reply wait queue flushed
+		outstanding = 0,
 		anomalies = NewAnomalies }.
 
 compute_next_reconnect_delay(#state{status = Status}) ->
@@ -412,7 +419,7 @@ reconnector_process(MCDServerPid, Address, Port) ->
           [MCDServerPid, Address,Port]),
 
 	Socket = case gen_tcp:connect(Address, Port,
-			[binary, {packet, line}], 5000) of
+			[{packet, line}, binary, {active, false}], 5000) of
 		{ ok, Sock } ->
 			gen_tcp:controlling_process(Sock, MCDServerPid),
 			Sock;
@@ -421,15 +428,6 @@ reconnector_process(MCDServerPid, Address, Port) ->
 	gen_server:cast(MCDServerPid, {connected, self(), Socket}).
 
 
-% Remove all the requests from the queue, and report errors to originators.
-flushRequestsQueue([]) -> ok;
-flushRequestsQueue([{_ReqId, From, _, _}|Objects]) ->
-	replyBack(From, {error, flushed}),
-	flushRequestsQueue(Objects);
-flushRequestsQueue(Tab) ->
-	flushRequestsQueue(ets:tab2list(Tab)),
-	ets:delete_all_objects(Tab).
-
 %%
 %% Send a query to the memcached server and add it to our local table
 %% to capture corresponding server response.
@@ -437,15 +435,15 @@ flushRequestsQueue(Tab) ->
 %% lagging memcached processes.
 %%
 
-scheduleQuery(#state{requests = QIN, replies = QOUT, reqQ = Tab, socket = Socket, status = ready} = State, Query, From) when QIN - QOUT < 1024 ->
-	case constructAndSendQuery(From, Query, Socket, Tab, QIN) of
-		ok -> State#state{requests = QIN + 1};
+scheduleQuery(#state{requests = QTotal, outstanding = QOut, receiver = Rcvr, socket = Socket, status = ready} = State, Query, From) when QOut < 1024 ->
+	case constructAndSendQuery(From, Query, Socket, Rcvr) of
+		ok -> State#state{requests = QTotal+1, outstanding = QOut+1};
 		{error, _Reason} -> reconnect(State)
 	end;
 scheduleQuery(State, _Query, From) ->
-	#state{requests = REQ, replies = REPL, anomalies = An, status = Status} = State,
+	#state{outstanding = QOut, anomalies = An, status = Status} = State,
 	if
-		REQ - REPL >= 1024 ->
+		QOut >= 1024 ->
 			replyBack(From, {error, overload}),
 			reportEvent(State, overload, []),
 			State#state{anomalies = incrAnomaly(An, overloads)};
@@ -454,12 +452,12 @@ scheduleQuery(State, _Query, From) ->
 			State
 	end.
 
-constructAndSendQuery(From, {'$constructed_query', _KeyMD5, {OTARequest, ReqType, ExpectationFlags}}, Socket, Tab, ReqId) ->
-	ets:insert(Tab, {ReqId, From, ReqType, ExpectationFlags}),
+constructAndSendQuery(From, {'$constructed_query', _KeyMD5, {OTARequest, ReqType, ExpectationFlags}}, Socket, {RcvrPid, _}) ->
+	RcvrPid ! {accept_response, From, ReqType, ExpectationFlags},
 	gen_tcp:send(Socket, OTARequest);
-constructAndSendQuery(From, Query, Socket, Tab, ReqId) ->
+constructAndSendQuery(From, Query, Socket, {RcvrPid, _}) ->
 	{_MD5Key, OTARequest, ReqType} = constructMemcachedQuery(Query),
-	ets:insert(Tab, {ReqId, From, ReqType, []}),
+	RcvrPid ! {accept_response, From, ReqType, []},
 	gen_tcp:send(Socket, OTARequest).
 
 %%
@@ -554,116 +552,92 @@ constructMemcachedQueryCmd(Cmd, Key, Data, Flags, Exptime)
 		integer_to_list(size(BinData)),
 		"\r\n", BinData, "\r\n"], rtCmd}.
 
-handleMemcachedServerResponse(Data,
-	#state{requests = QIN, replies = QOUT, reqQ = Tab, cont = Cont} = State
-    ) when QIN =/= QOUT ->
-	{From, Continuation} = case Cont of
-	  nocont ->
-		Expectation = genResponseExpectation(ets:lookup(Tab, QOUT)),
-		ets:delete(Tab, QOUT),
-		Expectation;
-	  ExistingExpectation -> ExistingExpectation
-	end,
-	% How this works: we have a continuation (closure) which
-	% knows what this request expects. If continuation wants
-	% additional data, it'll ask. If continuation is finished,
-	% it'll report that fact.
-	case Continuation(Data) of
-		{more, NewCont} ->
-			State#state{cont = {From, NewCont}};
-		Result ->
-			replyBack(From, Result),
-			State#state{replies = QOUT + 1, cont = nocont,
-				status = case State#state.status of
-					ready -> ready;
-					_ -> reportEvent(State, state, up),
-						ready
-				end
-			}
-	end.
-
-%%
-%% An expectation is a tuple describing how to parse server response and
-%% where to forward it.
-%%
-%% @spec genResponseExpectation([ExpectationDescriptor]) -> Expectation
-%% Type ExpectationDescriptor = {RequestId, From, ReqType, [ExpectationFlag]}
-%%	ExpectationFlag = raw_blob
-%% 	Expectation = {From, fun()}
-%%      ReqType = atom()
-%%      From = anon | {pid(), Tag}
-%%
-genResponseExpectation([{_RequestId, From, ReqType, ExpectationFlags}]) ->
-	{ From, expectationByRequestType(ReqType, ExpectationFlags) }.
-
-%% Generate a server response expectation closure, according to the
-%% request type.
-%% The request type actually maps to the server response structure.
-%% @spec expectationByRequestType(atom()) -> fun()
-expectationByRequestType(rtVer, _) ->
-	mkExpectKeyValue("VERSION");
-expectationByRequestType(rtGet, ExpFlags) ->
-	mkAny([mkExpectEND({error, notfound}), mkExpectValue(ExpFlags)]);
-expectationByRequestType(rtDel, _) ->
-	mkAny([mkExpectResp(<<"DELETED\r\n">>, {ok, deleted}),
-		mkExpectResp(<<"NOT_FOUND\r\n">>, {error, notfound})]);
-expectationByRequestType(rtCmd, _) ->
-	mkAny([mkExpectResp(<<"STORED\r\n">>, {ok, stored}),
-		mkExpectResp(<<"NOT_STORED\r\n">>, {error, notstored})]);
-expectationByRequestType(rtFlush, _) -> mkExpectResp(<<"OK\r\n">>, {ok, flushed}).
-
 replyBack(anon, _) -> true;
 replyBack(From, Result) -> gen_server:reply(From, Result).
 
-%% A combinator over potential response handler closure
-mkAny(RespFuns) -> fun (Data) -> mkAnyF(RespFuns, Data, unexpected) end.
-mkAnyF([], _Data, Error) -> { error, Error };
-mkAnyF([RespFun|Rs], Data, _Error) ->
-	case RespFun(Data) of
-		{ error, notfound } -> {error, notfound};
-		{ error, Reason } -> mkAnyF(Rs, Data, Reason);
-		Other -> Other
+data_receiver_loop(Parent, ParentMon, Socket) ->
+	NewSocket = receive
+	  {accept_response, RequestorFrom, Operation, Opts} when Socket /= undefined ->
+		try data_receiver_accept_response(Operation, Opts, Socket) of
+		  Value ->
+			Parent ! {request_served, Socket},
+			replyBack(RequestorFrom, Value),
+			Socket
+		catch
+		  error:{badmatch,{error,_}} ->
+			Parent ! {tcp_closed, Socket},
+			replyBack(RequestorFrom, {error, noconn}),
+			undefined
+		end;
+	  {accept_response, RequestorFrom, _, _} ->
+		replyBack(RequestorFrom, {error, noconn}),
+		Socket;
+	  {switch_receiving_socket, Parent, ReplaceSocket} ->
+		ReplaceSocket;
+	  {'DOWN', ParentMon, process, Parent, _} -> exit(normal);
+	  _Message -> Socket
+	end,
+	data_receiver_loop(Parent, ParentMon, NewSocket).
+
+data_receiver_accept_response(rtVer, _, Socket) ->
+	["VERSION", Value] = data_receive_string_tokens(Socket),
+	{ok, Value};
+data_receiver_accept_response(rtGet, ExpFlags, Socket) ->
+	{ok, HeaderLine} = gen_tcp:recv(Socket, 0),
+	case HeaderLine of
+	  % Quick test before embarking on tokenizing
+	  <<"END\r\n">> -> {error, notfound};
+	  _ ->
+		["VALUE", _Value, _Flag, DataSizeStr]
+			= string:tokens(binary_to_list(HeaderLine), " \r\n"),
+		ok = inet:setopts(Socket, [{packet, raw}]),
+		Bin = data_receive_binary(Socket, list_to_integer(DataSizeStr)),
+		<<"\r\nEND\r\n">> = data_receive_binary(Socket, 7),
+		ok = inet:setopts(Socket, [{packet, line}]),
+		case proplists:get_value(raw_blob, ExpFlags) of
+			true -> {ok, {'$value_blob', Bin}};
+			_ -> {ok, binary_to_term(Bin)}
+		end
+	end;
+data_receiver_accept_response(rtInt, _, Socket) ->
+	{ok, Response} = gen_tcp:recv(Socket, 0),
+	case string:to_integer(binary_to_list(Response)) of
+	  {Int, "\r\n"} when is_integer(Int) -> {ok, Int};
+	  {error, _} when Response == <<"NOT_FOUND\r\n">> -> {error, notfound};
+	  {error, _} -> data_receiver_error_reason(Response)
+	end;
+data_receiver_accept_response(rtCmd, _, Socket) ->
+	data_receiver_accept_choice(Socket,
+		[ {<<"STORED\r\n">>, {ok, stored}},
+		  {<<"NOT_STORED\r\n">>, {error, notstored}} ]);
+data_receiver_accept_response(rtDel, _, Socket) ->
+	data_receiver_accept_choice(Socket,
+		[ {<<"DELETED\r\n">>, {ok, deleted}},
+		  {<<"NOT_FOUND\r\n">>, {error, notfound}} ]);
+data_receiver_accept_response(rtFlush, _, Socket) ->
+	data_receiver_accept_choice(Socket, [ {<<"OK\r\n">>, {ok, flushed}} ]).
+
+data_receiver_accept_choice(Socket, Alternatives) ->
+	{ok, Response} = gen_tcp:recv(Socket, 0),
+	case lists:keysearch(Response, 1, Alternatives) of
+		{value, {_, Answer}} -> Answer;
+		false -> data_receiver_error_reason(Response)
 	end.
 
-%% Creates a closure which expects a particular reply in response
-mkExpectResp(Bin, Response) -> fun
-	(Data) when Bin == Data -> Response;
-	(_Data) -> {error, unexpected}
-    end.
+data_receive_binary(Socket, DataSize) when is_integer(DataSize) ->
+	{ok, Binary} = gen_tcp:recv(Socket, DataSize),
+	Binary.
 
-mkExpectEND(Result) -> mkExpectResp(<<"END\r\n">>, Result).
+data_receive_string_tokens(Socket) ->
+	{ok, Line} = gen_tcp:recv(Socket, 0),
+	String = binary_to_list(Line),
+	string:tokens(String, " \r\n").
 
-mkExpectValue(ExpFlags) -> fun (Data) ->
-	Tokens = string:tokens(erlang:binary_to_list(Data), [$ , $\r, $\n]),
-	case Tokens of
-		["VALUE", _Key, _Flags, BytesString] ->
-			Bytes = list_to_integer(BytesString),
-			{ more, mkExpectData(Bytes, ExpFlags) };
-		_ -> {error, unexpected}
-	end end.
+data_receiver_error_reason(<<"SERVER_ERROR ", Reason/binary>>) ->
+	data_receiver_error_reason(server_error, Reason);
+data_receiver_error_reason(<<"CLIENT_ERROR ", Reason/binary>>) ->
+	data_receiver_error_reason(client_error, Reason).
 
-mkExpectKeyValue(Key) when is_list(Key) -> fun (Data) ->
-	Tokens = string:tokens(erlang:binary_to_list(Data), [$ , $\r, $\n]),
-	case Tokens of
-		[Key, Value] -> {ok, Value};
-		_ -> {error, unexpected}
-	end end.
+data_receiver_error_reason(Code, Reason) ->
+	{error, {Code, [C || C <- binary_to_list(Reason), C >= $ ]}}.
 
-mkExpectData(Bytes, ExpFlags) when is_integer(Bytes), Bytes >= 0 ->
-	mkExpectData([], Bytes, Bytes+2, ExpFlags).
-mkExpectData(AlreadyHave, Bytes, ToGo, ExpFlags) ->
-  fun(Data) ->
-	DataSize = iolist_size(Data),
-	if
-		DataSize == ToGo ->
-			I = lists:reverse(AlreadyHave, [Data]),
-			B = iolist_to_binary(I),
-			V = case proplists:get_value(raw_blob, ExpFlags) of
-				true -> {'$value_blob', B};
-				_ -> binary_to_term(B)
-			end,
-			{ more, mkExpectEND({ ok, V })};
-		DataSize < ToGo -> { more, mkExpectData([Data | AlreadyHave],
-				Bytes, ToGo - DataSize, ExpFlags) }
-	end
-  end.
