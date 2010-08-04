@@ -1,6 +1,6 @@
 {application, mcd,
  [{description, "Fast memcached protocol client in pure Erlang"},
-  {vsn, "1.0.0"},
+  {vsn, "1.0"},
   {modules, [
 	dht_ring,
 	mcd,
