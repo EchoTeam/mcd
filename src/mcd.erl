@@ -80,6 +80,8 @@
 -module(mcd).
 -behavior(gen_server).
 
+-compile({no_auto_import,[monitor/3]}).
+
 -export([start_link/0, start_link/1, start_link/2]).
 -export([do/2, do/3, do/4]).
 -export([ldo/1, ldo/2, ldo/3, ldo/5]).	%% do('localmcd', ...)
