@@ -5,11 +5,10 @@ INSTALLDIR=$(prefix)/$(LIBDIR)/$(PROJECTNAME)-$(PROJECTVERSION)/ebin
 LIBDIR=$(shell erl -eval 'io:format("~s~n", [code:lib_dir()])' -s init stop -noshell)
 
 all:
-	mkdir -p ebin
-	for srcfile in src/*.erl; do erlc -o ebin $$srcfile; done
+	./rebar compile
 
 clean:
-	rm -rf ebin
+	./rebar clean
 
 install:
 	mkdir -p $(INSTALLDIR)
