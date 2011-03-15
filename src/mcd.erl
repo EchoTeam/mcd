@@ -166,7 +166,7 @@ async_set(ServerRef, Key, Data) ->
 	do_forwarder(cast, ServerRef, {set, Key, Data}),
 	Data.
 async_set(ServerRef, Key, Data, Flags, Expiration) when is_integer(Flags), is_integer(Expiration), Flags >= 0, Flags < 65536, Expiration >= 0 ->
-	do_forwarder(cast, ServerRef, {{set, Flags, Expiration}, Key, Data}),
+	do_forwarder(cast, ServerRef, {set, Key, Data, Flags, Expiration}),
 	Data.
 
 %%
