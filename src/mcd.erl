@@ -182,7 +182,7 @@ async_set(ServerRef, Key, Data, Flags, Expiration) when is_integer(Flags), is_in
 monitor(ServerRef, MonitorPid, MonitorItems) when is_list(MonitorItems) ->
 	gen_server:call(ServerRef, {set_monitor, MonitorPid, MonitorItems});
 monitor(ServerRef, MonitorPid, MonitorItem) when is_atom(MonitorItem) ->
-	monitor(ServerRef, MonitorPid, [MonitorItem]).
+	?MODULE:monitor(ServerRef, MonitorPid, [MonitorItem]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % gen_server callbacks
