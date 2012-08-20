@@ -1,4 +1,3 @@
-
 		Erlang memcached client library.
 
 This library provides two ways of working with memcached servers. One way
@@ -52,7 +51,7 @@ without the explicit mcd process specification.
 
 	{ mainCluster, { mcd_starter, start_link, [mainCluster, [
 			["remoteHost1"],
-			["remoteHost2", 1890] ] },
+			["remoteHost2", 1890] ] ] },
 		permanent, infinity, supervisor, [mcd_starter] }
 
      Note: the default port for "remoteHost1" is 11211.
