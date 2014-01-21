@@ -1,248 +1,263 @@
 %%% 
-%%% Copyright (c) 2008 JackNyfe, Inc. <info@jacknyfe.com>
+%%% Copyright (c) 2008-2014 JackNyfe, Inc. <info@jacknyfe.com>
 %%% All rights reserved.
+%%%
+%%% XXX: License?
 %%%
 %%% An implementation of DHT based on memcached. It is a gen_server process.
 %%%
 %%% XXX: more on the behaviour?
-%%%
-%%% Exports:
-%%%
-%%% start_link(Peers)
-%%%
-%%%   Start the cluster according to the peers specification Peers, which is
-%%%   in the format accepted by dht_ring:start_link/1. The Opaque field of the
-%%%   specification tuple has to be a ServerRef (per gen_server(3)) to a
-%%%   memcached process tied to the particular node.
 %%%
 
 -module(mcd_cluster).
 -behaviour(gen_server).
 
 -export([
-  start_link/1,
-  start_link/2,
-  nodes/1,
-  health/1,
-
-  % gen_server callbacks
-  code_change/3,
-  handle_call/3,
-  handle_cast/2,
-  handle_info/2,
-  init/1,
-  terminate/2,
-
-  % internal
-  forwardQueryToMCD/4
+    code_change/3,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    init/1,
+    terminate/2
 ]).
 
--define(DEBUG(X, Y), io:format("DEBUG: " ++ X, Y)).
+-export([
+    start_link/1,
+    start_link/2,
+    nodes/1,
+    health/1,
+    add/2,
+    delete/2,
+    stop/1,
+    forwardQueryToMCD/4
+]).
 
-% How often to probe nodes marked down to see if they came back up.
--define(PROBE_PERIOD, 15000).
+-record(state, {ring, down = []}).
 
--record(state, { ring, down = [] }).
+-type node_params() :: [{atom(), mcd:start_params(), pos_integer()}, ...].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Public API
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-start_link(Peers) ->
-  gen_server:start_link(?MODULE, [anonymous, Peers], []).
+-spec start_link(Nodes :: node_params()) -> {'ok', pid()}.
+start_link(Nodes) ->
+    gen_server:start_link(?MODULE, [anonymous, Nodes], []).
 
-start_link(Name, Peers) ->
-  gen_server:start_link({local, Name}, ?MODULE, [Name, Peers], []).
+-spec start_link(Name :: atom(), Nodes :: node_params()) -> {'ok', pid()}.
+start_link(Name, Nodes) ->
+    gen_server:start_link({local, Name}, ?MODULE, [Name, Nodes], []).
 
 nodes(ServerRef) ->
-  gen_server:call(ServerRef, get_nodes).
+    gen_server:call(ServerRef, get_nodes).
 
 health(ServerRef) ->
-  NodesDown = gen_server:call(ServerRef, get_nodes_down),
-  [{Name, State, Info} ||
-	{Name, Ref} = Node <- ?MODULE:nodes(ServerRef),
-	Info <- [gen_server:call(Ref, info)],
-	State <- [case lists:member(Node, NodesDown) of
-			false -> up;
-			true -> down
-		end]
-  ].
+    PidsDown = gen_server:call(ServerRef, get_pids_down),
+    [{Name, State, Info} ||
+        {Name, Ref} <- ?MODULE:nodes(ServerRef),
+        Info <- [gen_server:call(Ref, {version})],
+        State <- [case lists:member(Ref, PidsDown) of
+            false -> up;
+            true -> down
+        end]
+    ].
+
+add(ServerRef, {_, _, _} = Node) ->
+    gen_server:call(ServerRef, {add, [Node]});
+
+add(ServerRef, Nodes) when is_list(Nodes) ->
+    gen_server:call(ServerRef, {add, Nodes}).
+
+delete(ServerRef, Node) when not is_list(Node) ->
+    gen_server:call(ServerRef, {delete, [Node]});
+
+delete(ServerRef, Nodes) ->
+    gen_server:call(ServerRef, {delete, Nodes}).
+
+stop(ServerRef) ->
+    gen_server:call(ServerRef, stop).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % gen_server callbacks
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
+    {ok, State}.
 
 %%%
 
-handle_call({'$constructed_query', _, _} = ReadyQuery, From, #state{ring=Ring}=State) ->
-	spawn(?MODULE, forwardQueryToMCD, [self(), From, Ring, ReadyQuery]),
-	{noreply, State};
+handle_call({'$constructed_query', _, _} = ReadyQuery, From, #state{ring=Ring, down = PidsDown}=State) ->
+    spawn(?MODULE, forwardQueryToMCD, [From, Ring, mk_down_filter(PidsDown), ReadyQuery]),
+    {noreply, State};
+handle_call({get, _} = ReadyQuery, From, #state{ring=Ring, down = PidsDown}=State) ->
+    spawn(?MODULE, forwardQueryToMCD, [From, Ring, mk_down_filter(PidsDown), ReadyQuery]),
+    {noreply, State};
 
 handle_call(get_nodes, _From, #state{ring = Ring} = State) ->
-	{reply, dht_ring:nodes(Ring), State};
+    {reply, dht_ring:nodes(Ring), State};
 
-handle_call(get_nodes_down, _From, #state{down = Down} = State) ->
-	{reply, Down, State};
+handle_call(get_pids_down, _From, #state{down = Down} = State) ->
+    {reply, Down, State};
+
+handle_call({lookup_nodes, Key}, _From, #state{ring = Ring} = State) ->
+    {reply, dht_ring:lookup(Ring, Key), State};
+
+handle_call(get_internal_state, _From, State) ->
+    {reply, State, State};
+
+handle_call({add, Nodes}, _From, #state{ring = Ring} = State) ->
+    Result = case dht_ring:add(Ring, Nodes) of
+        ok ->
+            ok;
+        {error, already_there, _} = Overlaps ->
+            Overlaps;
+        Other ->
+            {error, Other}
+    end,
+    {reply, Result, State};
+
+handle_call({delete, Nodes}, _From, #state{ring = Ring} = State) ->
+    Result = case dht_ring:delete(Ring, Nodes) of
+        ok ->
+            ok;
+        {error, unknown_nodes, _} = NotThere ->
+            NotThere;
+        Other ->
+            {error, Other}
+    end,
+    {reply, Result, State};
+
+handle_call(stop, _From, State) ->
+    {stop, normal, {ok, stopped}, State};
 
 handle_call(_Request, _From, State) ->
-  {noreply, State}.
+    {noreply, State}.
 
 %%%
 
-handle_cast({down, NewDown}, #state{ down = CurDown } = State) ->
-  {
-    noreply,
-    State#state{
-      down = lists:ukeymerge(1, CurDown, lists:keysort(1, NewDown))
-    }
-  };
-
-handle_cast({'$constructed_query', _, _} = ReadyQuery, #state{ring=Ring}=State) ->
-	spawn(?MODULE, forwardQueryToMCD, [self(), anon, Ring, ReadyQuery]),
-	{noreply, State};
+handle_cast({'$constructed_query', _, _} = ReadyQuery, #state{ring=Ring,down=PidsDown}=State) ->
+    spawn(?MODULE, forwardQueryToMCD, [anon, Ring, mk_down_filter(PidsDown), ReadyQuery]),
+    {noreply, State};
 
 handle_cast(_Request, State) ->
-  {noreply, State}.
+    {noreply, State}.
 
-%%%
+handle_info({memcached, Pid, state, up}, #state{down = NodesDown} = State) ->
+    lager:info("memcached node(~p) seems to be back up~n", [Pid]),
+    {noreply, State#state{down = lists:delete(Pid, NodesDown)}};
 
-handle_info({probe_nodes}, #state{ down = [] } = State) ->
-  {noreply, State};
+handle_info({memcached, Pid, state, down}, #state{down = NodesDown} = State) ->
+    lager:info("memcached node(~p) is disconnected~n", [Pid]),
+    {noreply, State#state{down = lists:usort([Pid|NodesDown])}};
 
-handle_info({probe_nodes}, #state{ down = NodesDown } = State) ->
-  Server = self(),
-
-  spawn_link(
-    fun() ->
-      [Server ! {up, Name}
-        || {Name, _} = Node <- NodesDown,
-        FlushResult <- [flush_node(Node)],
-        FlushResult /= {error, noconn}
-      ]
-    end
-  ),
-
-  {noreply, State};
-
-handle_info({up, Name}, #state{ down = NodesDown } = State) ->
-
-  case lists:keytake(Name, 1, NodesDown) of
-    {value, _RemovedNode, StillDown} ->
-      error_logger:info_msg("memcached node ~p seems to be back up~n", [Name]),
-      {noreply, State#state{ down = StillDown }};
-
-    false ->
-      {noreply, State}
-  end;
-  
 handle_info(_Request, State) ->
-  {noreply, State}.
+    {noreply, State}.
 
 %%%
 
-init([ClusterName, Peers]) ->
-  timer:send_interval(?PROBE_PERIOD, {probe_nodes}),
-  {ok, Ring} = dht_ring:start_link(Peers),
-
-  % The peer can be specified by its registered name or its pid.
-  % in case of pid, we are risking to be left without any underlying
-  % memcached gen_servers if they die, without notice.
-  % That is why we link them here to restart the whole shebang
-  % if any underlying gen_server dies.
-  [error_logger:info_msg("Linked memcached ~p (~p) to cluster '~p'~n",
-		[Name, NodeRef, ClusterName])
-	|| {Name, NodeRef} <- dht_ring:nodes(Ring),
-		is_pid(NodeRef), link(NodeRef) == true],
-
-  {ok, #state{ ring = Ring }}.
-
+init([ClusterName, Nodes]) ->
+    lager:info("starting mcd_cluster(~p): ~p ~p", [self(), ClusterName, Nodes]),
+    Peers = lists:map(fun ({Name, Addr, Weight}) ->
+                {ok, Pid} = mcd:start_link(Addr),
+                mcd:monitor(Pid, self(), [state]),
+                {Name, Pid, Weight}
+            end, Nodes),
+    {ok, Ring} = dht_ring:start_link(Peers),
+    {ok, #state{ ring = Ring }}.
 
 terminate(_Reason, _State) ->
-  ok.
+    ok.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Internal functions
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-call_node({Name, ServerRef}, Command) ->
-  Reply = gen_server:call(ServerRef, Command),
-  case connectivity_failure(Reply) of
-    {true, Reason} ->
-      error_logger:error_msg(
-        "Couldn't reach memcached at ~p (~p), considering it down.~n",
-        [Name, Reason]
-      ),
-      Reply;
+log_problems(Node, Command, Start, Res) ->
+    Threshold = 1000000, % 1 sec
+    Diff = timer:now_diff(now(), Start),
+    ShouldLog = case {Diff, Res} of
+        {T,_}  when T > Threshold -> true;
+        {_, {exception, _}} -> true;
+        _ -> false
+    end,
+    case ShouldLog of 
+        true ->
+            MD5 = case Command of
+                {'$constructed_query', M, _} -> M;
+                _ -> Command
+            end,
+            lager:warning([{tag, mcd_long_response}], 
+                "Request took more than ~pms or exception caught: ~n"
+                "Node:~p~n"
+                "MD5:~p~n"
+                "Res:~p~n"
+                "Time:~pms~n", [Threshold div 1000, Node, MD5, Res, Diff div 1000]);
+        _ -> nop
+    end.
 
-    false ->
-      Reply
-  end.
-
-%%%
-
-call_nodes(Nodes, Command) ->
-  call_nodes(Nodes, Command, [], not_failover).
-
-call_nodes([], _, NodesDown, _) -> {{error, all_nodes_down}, NodesDown};
-
-call_nodes(Nodes, Command, NodesDown, failover) ->
-  [{Name, _ServerRef} = Node | OtherNodes] = Nodes,
-  error_logger:info_msg("Failing over to node ~p~n", [Name]),
-
-  case flush_node(Node) of
-    {error, noconn} ->
-      call_nodes(OtherNodes, Command, [Node | NodesDown], failover);
-
-    {error, Reason} = Reply ->
-      error_logger:error_msg(
-        "Failed to flush node ~p, considering it's up but returning error "
-        "(~p)~n",
-        [Name, Reason]
-      ),
-      Reply;
-
-    _ ->
-      call_nodes(Nodes, Command, NodesDown, not_failover)
-  end;
-
-call_nodes([Node | OtherNodes], Command, NodesDown, not_failover) ->
-  Reply = call_node(Node, Command),
-  case Reply of
-    {error, noconn} ->
-      call_nodes(OtherNodes, Command, [Node | NodesDown], failover);
-    _ ->
-      {Reply, NodesDown}
-  end.
+call_node({_Name, ServerRef}=Node, Command) ->
+    Start = now(),
+    try gen_server:call(ServerRef, Command) of
+        Res -> 
+            log_problems(Node, Command, Start, Res),
+            Res
+    catch C:R -> 
+        log_problems(Node, Command, Start, {exception, {C,R}}),
+        erlang:raise(C, R, erlang:get_stacktrace())
+    end.
 
 %%%
 
-flush_node({Name, _ServerRef} = Node) ->
-  error_logger:info_msg("Flushing memcached node ~p~n", [Name]),
-  call_node(Node, {flush_all}).
+call_nodes([], _, _) -> {error, nonodes};
+
+call_nodes([Node | OtherNodes], Filter, Command) ->
+    case Filter(Node) of
+        true  ->
+            Reply = call_node(Node, Command),
+            case is_connectivity_failure(Reply) of
+                true ->
+                    call_nodes(OtherNodes, Filter, Command);
+                false ->
+                    Reply
+            end;
+        false ->
+            call_nodes(OtherNodes, Filter, Command)
+    end.
 
 %%%
 
-connectivity_failure({error, noconn}) -> {true, noconn};
-connectivity_failure(_) -> false.
+is_connectivity_failure({error, noconn}) -> true;
+is_connectivity_failure(_) -> false.
 
 %%%
 
-forwardQueryToMCD(ClusterRef, From, Ring, {'$constructed_query', MD5Key, _} = Q) ->
-	NodeList = case MD5Key of
-		<<>> -> dht_ring:nodes(Ring);
-		Bin -> dht_ring:lookup(Ring, Bin)
-	end,
-	{Reply, NodesDown} = call_nodes(NodeList, Q),
-	case NodesDown of
-		[] -> ok;
-		_ -> gen_server:cast(ClusterRef, {down, NodesDown})
-	end,
-	case From of
-		anon -> ok;
-		_ -> gen_server:reply(From, Reply)
-	end.
+forwardQueryToMCD(From, Ring, Filter, {'$constructed_query', MD5Key, _} = Q) ->
+    forwardQueryToMCD(From, Ring, Filter, MD5Key, Q);
+forwardQueryToMCD(From, Ring, Filter, {get, Key} = Q) ->
+    MD5Key = erlang:md5(term_to_binary(Key)),
+    forwardQueryToMCD(From, Ring, Filter, MD5Key, Q).
 
+forwardQueryToMCD(From, Ring, Filter, MD5Key, Q) ->
+    NodeList = case MD5Key of
+        <<>> -> dht_ring:nodes(Ring);
+        Bin -> dht_ring:lookup(Ring, Bin)
+    end,
+    Reply = call_nodes(NodeList, Filter, Q),
+    case From of
+        anon -> ok;
+        _ ->
+            Reply2 =
+                case Reply of
+                    {error, nonodes} ->
+                        lager:error("Node ~p doesn't see others: ~p~n", [node(), NodeList]),
+                        {error, all_nodes_down};
+                    _ -> Reply
+                end,
+            gen_server:reply(From, Reply2)
+    end.
+
+mk_down_filter(PidsDown) ->
+    fun ({_, Pid}) ->
+        not lists:member(Pid, PidsDown)
+    end.

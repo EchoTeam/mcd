@@ -1,16 +1,13 @@
 {application, mcd,
- [{description, "Fast memcached protocol client in pure Erlang"},
-  {vsn, "1.0"},
-  {modules, [
-	dht_ring,
-	mcd,
-	mcd_cluster,
-	mcd_starter
-            ]},
+ [
+  {description, "Fast memcached protocol client in pure Erlang"},
+  {vsn, "1.1.0"},
+  {registered, [mcd, mcd_cluster, mcd_cluster_sup, mcd_parallel]},
   {applications, [
                   kernel,
-                  stdlib
+                  stdlib,
+                  dht_ring
                  ]},
-  {registered, []},
-  {env, [ ]}
+  {mod, { mcd_app, []}},
+  {env, []}
  ]}.

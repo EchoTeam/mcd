@@ -23,50 +23,62 @@ The mcd API can use the returned pid() and the registered name interchangeably.
 	mcd:set(myMcd, a, b).
 	mcd:get(myMcd, a).
 
-The 'localmcd' name is a special convention, allowing mcd API to be used
+The mcd:lserver() name is a special convention, allowing mcd API to be used
 without the explicit mcd process specification.
 
-	unlink(element(2, mcd:start_link(localmcd, []))).
-	mcd:set(a, b).
-	mcd:get(a).
+	unlink(element(2, mcd:start_link(mcd:lserver(), []))).
+	mcd:lset(a, b).
+	mcd:lget(a).
 
-1.2  A ChildSpec for running the mcd named 'localmcd' under a supervisor
+1.2  A ChildSpec for running the mcd named mcd:lserver() under a supervisor
 
-	{ localmcd, { mcd, start_link,
-	  [localmcd, ["localhost", 11211] ] },
-	  permanent, 10000, worker, [mcd] }
+	{ local_memcache, { mcd, start_link,
+		[mcd:lserver(), ["localhost", 11211] ]
+	}, permanent, 10000, worker, [mcd] }
 
 
 2. RUNNING IN CLUSTERED MODE
 
-   mcd_starter starts a set of of memcached instances and mcd_cluster
+   mcd_cluster starts a set of of memcached instances and
    dispatcher attached to them. All memcached instances and mcd_cluster
    are linked to this gen_server, so a proper exit hierarchy is formed.
 
 2.1  Starting memcached cluster from the command line (e.g., for testing)
 
-	mcd_starter:start_link(mainCluster,
-		[ ["remoteHost1", 11211], ["remoteHost2", 1890] ]).
+	mcd_cluster:start_link(mainCluster, [
+		{host1, ["localhost", 11211], 10},
+		{host2, ["localhost", 11211], 20}
+	]).
 
 2.2  A ChildSpec for running the cluster named 'mainCluster' under a supervisor
 
-	{ mainCluster, { mcd_starter, start_link, [mainCluster, [
-			["remoteHost1"],
-			["remoteHost2", 1890] ] },
-		permanent, infinity, supervisor, [mcd_starter] }
+	{ mainCluster, { mcd_cluster, start_link, [mainCluster, [
+		{host1, ["localhost"], 10},
+		{host2, ["localhost"], 20}
+	]]}, permanent, 60000, worker, [mcd_starter] }
 
-     Note: the default port for "remoteHost1" is 11211.
+	Note: the default port for "localhost" is 11211.
 
+2.3 Starting memcached cluster as an application
+
+	application:set_env(mcd, mcd_hosts, [{localhost, ["localhost"]}]).
+	application:set_env(mcd, mcd_buckets, [
+		{cluster1, {localhost, 11211}},
+		{cluster2, {localhost, 11211}}
+	]).
+	application:start(mcd).
+
+	{error, notfound} = mcd:get(cluster1, foo).
+	{error, notfound} = mcd:get(cluster2, foo).
 
 3. USING MEMCACHED
 
-	{ok, b} = mcd:set(localmcd, a, b).
-	{error, notfound} = mcd:get(localmcd, foo).
+	{ok, b} = mcd:set(mcd:lserver(), a, b).
+	{error, notfound} = mcd:get(mcd:lserver(), foo).
 	{ok, [42]} = mcd:set(mainCluster, <<"bar">>, [42]).
 	{ok, [42]} = mcd:get(mainCluster, <<"bar">>).
 
-By convention, you can omit specifying 'localmcd' (see 1.2):
+By convention, you can omit specifying mcd:lserver() (see 1.2):
 
-	{ok, alive} = mcd:set(self(), alive).
-	{ok, alive} = mcd:get(self()).
-
+	{ok, alive} = mcd:lset(self(), alive).
+	{ok, alive} = mcd:lget(self()).
