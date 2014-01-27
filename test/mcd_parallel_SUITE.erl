@@ -10,12 +10,14 @@
 
 -export([
     test_simple/1,
-    test_noproc/1
+    test_noproc/1,
+    test_timeout/1
 ]).
 
 all() -> [
     test_simple,
-    test_noproc
+    test_noproc,
+    test_timeout
 ].
 
 init_per_suite(Config) ->
@@ -73,17 +75,32 @@ test_noproc(_Config) ->
     Wants = [{undefined, undefined}],
     {{error, noproc}} = mcd_parallel:get(Wants, Satisfier).
 
+test_timeout(_Config) ->
+    Pid = spawn_link(fun() ->
+        timer:sleep(1000)
+    end),
+    Satisfier = fun(A) ->
+        {result, {A}}
+    end,
+    Wants = [{Pid, undefined}],
+    try
+        {error, {parallel, timeout}} = mcd_parallel:get(Wants, Satisfier, 0)
+    after
+        unlink(Pid),
+        exit(Pid, kill)
+    end.
+
 test_parallel(Data, Satisfier) ->
     Wants = [{Bucket, Key} || {Bucket, Key, _Value} <- Data],
     ErrorResult = list_to_tuple([{error, notfound} || _Item <- Data]),
-    {TDelta1, ErrorResult} = timer:tc(mcd_parallel, get, [Wants, Satisfier]),
+
+    [mcd:delete(Bucket, Key) || {Bucket, Key, _Value} <- Data],
+    ErrorResult = mcd_parallel:get(Wants, Satisfier),
 
     [{ok, Value} = mcd:set(Bucket, Key, Value) || {Bucket, Key, Value} <- Data],
     try
         OkResult = list_to_tuple([{ok, Value} || {_Bucket, _Key, Value} <- Data]),
-        {TDelta2, OkResult} = timer:tc(mcd_parallel, get, [Wants, Satisfier]),
-        {error, {parallel, timeout}} = mcd_parallel:get(Wants, Satisfier, 0),
-        {ok, (TDelta1 + TDelta2) / 2.0}
+        OkResult = mcd_parallel:get(Wants, Satisfier)
     after
         [{ok, deleted} = mcd:delete(Bucket, Key) || {Bucket, Key, _Value} <- Data]
     end.

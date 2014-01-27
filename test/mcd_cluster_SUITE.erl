@@ -45,7 +45,8 @@ test_noconn(_Config) ->
         ok = mcd:break_connection(Pid),
         try
             {error, noconn} = mcd:version(Pid),
-            true  = lists:member(Pid, gen_server:call(Bucket, get_pids_down)),
+            timer:sleep(100),
+            true = lists:member(Pid, gen_server:call(Bucket, get_pids_down)),
             io:format("Ok. Node is marked as down~n")
         after
             ok = mcd:fix_connection(Pid),

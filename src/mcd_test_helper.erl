@@ -16,7 +16,8 @@ wait_connection(Pid, Started, Timeout) ->
     case {mcd:version(Pid), Timeout - (timer:now_diff(now(), Started) div 1000)} of
         {{ok, [_ | _]}, _} ->
             ok;
-        {_, WaitMore} when WaitMore =< 0 ->
+        {Error, WaitMore} when WaitMore =< 0 ->
+            lager:error("Unexpected mcd answer: ~p~n", [Error]),
             {error, timeout};
         {_, _} ->
             timer:sleep(10),
