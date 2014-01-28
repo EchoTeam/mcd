@@ -19,6 +19,7 @@ test-unit: all
 	$(REBAR) eunit skip_deps=true
 
 test-ct: all
+	memcached -d
 	$(REBAR) ct skip_deps=true
 
 check: test-unit test-ct
