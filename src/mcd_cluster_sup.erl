@@ -21,6 +21,8 @@
     buckets/0
 ]).
 
+-define(WEIGHT, 200).
+
 %% ==========================================================
 %% API functions
 %% ==========================================================
@@ -80,7 +82,7 @@ cluster_supervisor_spec(Cluster) ->
 bucket_spec(Bucket) ->
     {Cluster, Port} = mcd_bucket(Bucket),
     Nodes = mcd_cluster(Cluster),
-    Peers = [{list_to_atom(Node), [Node, Port], 10} || Node <- Nodes],
+    Peers = [{list_to_atom(Node), [Node, Port], ?WEIGHT} || Node <- Nodes],
     {Bucket, {mcd_cluster, start_link, [Bucket, Peers]}, permanent, 60000, worker, [mcd_cluster]}.
 
 cluster_name(Cluster) ->
