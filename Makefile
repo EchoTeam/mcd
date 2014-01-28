@@ -1,22 +1,38 @@
-REBAR=$(shell which rebar || echo ./rebar)
+.PHONY: all get-deps compile clean test-unit test-ct check distclean
+REBAR := $(shell which ./rebar || which rebar)
+
 PROJECTNAME=mcd
 PROJECTVERSION=1.1.0
 
 INSTALLDIR=$(LIBDIR)/$(PROJECTNAME)-$(PROJECTVERSION)/ebin
 LIBDIR=$(shell erl -eval 'io:format("~s~n", [code:lib_dir()])' -s init stop -noshell)
 
-all: 	$(REBAR)
-		$(REBAR) get-deps
-		$(REBAR) compile
+all: get-deps compile
+
+compile:
+	$(REBAR) compile
+
+get-deps:
+	$(REBAR) get-deps
+
+test-unit: all
+	$(REBAR) eunit skip_deps=true
+
+test-ct: all
+	$(REBAR) ct skip_deps=true
+
+check: test-unit test-ct
 
 clean:
 		$(REBAR) clean
-		$(REBAR) delete-deps
 		rm -rf ./ebin
-		rm -rf ./deps
 		rm -rf ./logs
-		rm -rf ./erl_crash.dump
+		rm -f ./erl_crash.dump
+		rm -rf ./.eunit
 		rm -f ./test/*.beam
+
+distclean: clean
+	rm -rf ./deps
 
 install-lib:
 	mkdir -p $(INSTALLDIR)
