@@ -71,4 +71,4 @@ Note: the default port for "localhost" is 11211.
     {ok, [42]} = mcd:get(mainCluster, <<"bar">>).
 
 ## 4. RELEASE NOTES
-    See [CHANGELOG.md](CHANGELOG.md)
+See [CHANGELOG.md](CHANGELOG.md)
