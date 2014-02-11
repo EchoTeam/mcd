@@ -6,11 +6,12 @@
 -define(setup(F), {setup, fun setup/0, fun cleanup/1, F}).
 
 % XXX: turn off 'INFO' output
+% XXX: mock memcached
 
 mcd_node(NodeId) ->
     {NodeId, ["localhost", 2222], 10}.
 
-check_using_startup_args_test() ->
+using_startup_args_test() ->
     NodeId = localhost,
     mcd_cluster:start_link(?NAME, [mcd_node(NodeId)]),
     Nodes = mcd_cluster:nodes(?NAME),
