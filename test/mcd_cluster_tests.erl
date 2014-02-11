@@ -15,12 +15,41 @@
 mcd_node(NodeId) ->
     {NodeId, ["localhost", 2222], 10}.
 
-using_startup_args_test() ->
-    NodeId = localhost,
-    mcd_cluster:start_link(?NAME, [mcd_node(NodeId)]),
-    Nodes = mcd_cluster:nodes(?NAME),
-    ?assertMatch([{NodeId, _}], Nodes),
-    mcd_cluster:stop(?NAME).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+test_XXX_test_() -> 
+  [
+    {
+      foreach,
+
+      % setup
+      fun() ->
+        NodeId = localhost,
+        {ok, _Pid} = mcd_cluster:start_link(?NAME, [mcd_node(NodeId)]),
+        NodeId
+      end,
+
+      % cleanup
+      fun(_NodeId) ->
+        mcd_cluster:stop(?NAME)
+      end,
+
+      % instantiators
+      [
+        fun(NodeId) ->
+          {
+            % XXX: this should really be tested outside of the fixture
+            "using startup parameters",
+            fun() ->
+              Nodes = mcd_cluster:nodes(?NAME),
+              ?assertMatch([{NodeId, _}], Nodes)
+            end
+          }
+        end
+      ]
+    }
+  ].
 
 all_test_() ->
     [{"Check MCD cluster",
