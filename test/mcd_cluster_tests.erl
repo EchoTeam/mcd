@@ -7,6 +7,10 @@
 
 % XXX: turn off 'INFO' output
 % XXX: mock memcached
+% XXX: add check that adding nodes preserves their order, e.g. if we add
+%      a, c and then b we will get back [a, c, b], not [a, b, c]
+
+%%% Test helpers %%%
 
 mcd_node(NodeId) ->
     {NodeId, ["localhost", 2222], 10}.
@@ -20,7 +24,7 @@ using_startup_args_test() ->
 
 all_test_() ->
     [{"Check MCD cluster",
-      ?setup(fun() -> [check_node_(),
+      ?setup(fun() -> [check_node_(),     % using_startup_args_test
                         add_node_(),
                         check_node_2_(),
                         add_node_dup_(),
