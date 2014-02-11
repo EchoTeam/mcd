@@ -61,6 +61,16 @@ test_XXX_test_() ->
               ?assertMatch([{FirstNodeId, _}, {SecondNodeId, _}], Nodes)
             end
           }
+        end,
+
+        fun(FirstNodeId) ->
+          {
+            "Adding duplicate node",
+            fun() ->
+              Result = mcd_cluster:add(?NAME, mcd_node(FirstNodeId)),
+              ?assertEqual({error, already_there, [FirstNodeId]}, Result)
+            end
+          }
         end
       ]
     }
@@ -71,7 +81,7 @@ all_test_() ->
       ?setup(fun() -> [check_node_(),     % using_startup_args_test
                         add_node_(),
                         check_node_2_(),  % add_node_test
-                        add_node_dup_(),
+                        add_node_dup_(),  % done
                         check_node_2_(),
                         del_node_(),
                         check_node_(),
