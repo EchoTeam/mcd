@@ -1,7 +1,3 @@
-%%% 
-%%% Copyright (c) 2007-2014 JackNyfe, Inc. <info@jacknyfe.com>
-%%% All rights reserved.
-%%%
 -module(mcd_app).
 
 -behaviour(application).

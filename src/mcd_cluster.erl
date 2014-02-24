@@ -1,8 +1,3 @@
-%%% 
-%%% Copyright (c) 2008-2014 JackNyfe, Inc. <info@jacknyfe.com>
-%%% All rights reserved.
-%%%
-%%% XXX: License?
 %%%
 %%% An implementation of DHT based on memcached. It is a gen_server process.
 %%%
