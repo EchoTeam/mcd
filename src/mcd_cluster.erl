@@ -19,15 +19,21 @@
 -export([
     start_link/1,
     start_link/2,
+    start_link/3,
     nodes/1,
     health/1,
     add/2,
     delete/2,
     stop/1,
-    forwardQueryToMCD/4
+    forwardQueryToMCD/5
 ]).
 
--record(state, {ring, down = []}).
+-record(state,
+        {
+         mod,
+         dispatcher,
+         down = []
+        }).
 
 -type node_params() :: [{atom(), mcd:start_params(), pos_integer()}, ...].
 
@@ -37,11 +43,15 @@
 
 -spec start_link(Nodes :: node_params()) -> {'ok', pid()}.
 start_link(Nodes) ->
-    gen_server:start_link(?MODULE, [anonymous, Nodes], []).
+    gen_server:start_link(?MODULE, [anonymous, Nodes, dht_ring], []).
 
 -spec start_link(Name :: atom(), Nodes :: node_params()) -> {'ok', pid()}.
 start_link(Name, Nodes) ->
-    gen_server:start_link({local, Name}, ?MODULE, [Name, Nodes], []).
+    gen_server:start_link({local, Name}, ?MODULE, [Name, Nodes, dht_ring], []).
+
+-spec start_link(Name :: atom(), Nodes :: node_params(), Dispatcher :: module()) -> {'ok', pid()}.
+start_link(Name, Nodes, Dispatcher) ->
+    gen_server:start_link({local, Name}, ?MODULE, [Name, Nodes, Dispatcher], []).
 
 nodes(ServerRef) ->
     gen_server:call(ServerRef, get_nodes).
@@ -81,27 +91,29 @@ code_change(_OldVsn, State, _Extra) ->
 
 %%%
 
-handle_call({'$constructed_query', _, _} = ReadyQuery, From, #state{ring=Ring, down = PidsDown}=State) ->
-    spawn(?MODULE, forwardQueryToMCD, [From, Ring, mk_down_filter(PidsDown), ReadyQuery]),
+handle_call({'$constructed_query', _, _} = ReadyQuery, From,
+            #state{dispatcher = Dispatcher, mod = Mod, down = PidsDown}=State) ->
+    spawn(?MODULE, forwardQueryToMCD, [From, Mod, Dispatcher, mk_down_filter(PidsDown), ReadyQuery]),
     {noreply, State};
-handle_call({get, _} = ReadyQuery, From, #state{ring=Ring, down = PidsDown}=State) ->
-    spawn(?MODULE, forwardQueryToMCD, [From, Ring, mk_down_filter(PidsDown), ReadyQuery]),
+handle_call({get, _} = ReadyQuery, From,
+            #state{dispatcher = Dispatcher, mod = Mod, down = PidsDown}=State) ->
+    spawn(?MODULE, forwardQueryToMCD, [From, Mod, Dispatcher, mk_down_filter(PidsDown), ReadyQuery]),
     {noreply, State};
 
-handle_call(get_nodes, _From, #state{ring = Ring} = State) ->
-    {reply, dht_ring:nodes(Ring), State};
+handle_call(get_nodes, _From, #state{mod = Mod, dispatcher = Dispatcher} = State) ->
+    {reply, Mod:nodes(Dispatcher), State};
 
 handle_call(get_pids_down, _From, #state{down = Down} = State) ->
     {reply, Down, State};
 
-handle_call({lookup_nodes, Key}, _From, #state{ring = Ring} = State) ->
-    {reply, dht_ring:lookup(Ring, Key), State};
+handle_call({lookup_nodes, Key}, _From, #state{mod = Mod, dispatcher = Dispatcher} = State) ->
+    {reply, Mod:lookup(Dispatcher, Key), State};
 
 handle_call(get_internal_state, _From, State) ->
     {reply, State, State};
 
-handle_call({add, Nodes}, _From, #state{ring = Ring} = State) ->
-    Result = case dht_ring:add(Ring, Nodes) of
+handle_call({add, Nodes}, _From, #state{mod = Mod, dispatcher = Dispatcher} = State) ->
+    Result = case Mod:add(Dispatcher, Nodes) of
         ok ->
             ok;
         {error, already_there, _} = Overlaps ->
@@ -111,8 +123,8 @@ handle_call({add, Nodes}, _From, #state{ring = Ring} = State) ->
     end,
     {reply, Result, State};
 
-handle_call({delete, Nodes}, _From, #state{ring = Ring} = State) ->
-    Result = case dht_ring:delete(Ring, Nodes) of
+handle_call({delete, Nodes}, _From, #state{mod = Mod, dispatcher = Dispatcher} = State) ->
+    Result = case Mod:delete(Dispatcher, Nodes) of
         ok ->
             ok;
         {error, unknown_nodes, _} = NotThere ->
@@ -130,8 +142,9 @@ handle_call(_Request, _From, State) ->
 
 %%%
 
-handle_cast({'$constructed_query', _, _} = ReadyQuery, #state{ring=Ring,down=PidsDown}=State) ->
-    spawn(?MODULE, forwardQueryToMCD, [anon, Ring, mk_down_filter(PidsDown), ReadyQuery]),
+handle_cast({'$constructed_query', _, _} = ReadyQuery,
+            #state{mod = Mod, dispatcher = Dispatcher, down=PidsDown}=State) ->
+    spawn(?MODULE, forwardQueryToMCD, [anon, Mod, Dispatcher, mk_down_filter(PidsDown), ReadyQuery]),
     {noreply, State};
 
 handle_cast(_Request, State) ->
@@ -150,15 +163,15 @@ handle_info(_Request, State) ->
 
 %%%
 
-init([ClusterName, Nodes]) ->
-    lager:info("starting mcd_cluster(~p): ~p ~p", [self(), ClusterName, Nodes]),
+init([ClusterName, Nodes, DispatcherMod]) ->
+    lager:info("starting mcd_cluster(~p): ~p ~p ~p", [self(), ClusterName, Nodes, DispatcherMod]),
     Peers = lists:map(fun ({Name, Addr, Weight}) ->
                 {ok, Pid} = mcd:start_link(Addr),
                 mcd:monitor(Pid, self(), [state]),
                 {Name, Pid, Weight}
             end, Nodes),
-    {ok, Ring} = dht_ring:start_link(Peers),
-    {ok, #state{ ring = Ring }}.
+    {ok, Dispatcher} = DispatcherMod:start_link(Peers),
+    {ok, #state{ dispatcher = Dispatcher, mod = DispatcherMod }}.
 
 terminate(_Reason, _State) ->
     ok.
@@ -227,16 +240,16 @@ is_connectivity_failure(_) -> false.
 
 %%%
 
-forwardQueryToMCD(From, Ring, Filter, {'$constructed_query', MD5Key, _} = Q) ->
-    forwardQueryToMCD(From, Ring, Filter, MD5Key, Q);
-forwardQueryToMCD(From, Ring, Filter, {get, Key} = Q) ->
+forwardQueryToMCD(From, Mod, Dispatcher, Filter, {'$constructed_query', MD5Key, _} = Q) ->
+    forwardQueryToMCD(From, Mod, Dispatcher, Filter, MD5Key, Q);
+forwardQueryToMCD(From, Mod, Dispatcher, Filter, {get, Key} = Q) ->
     MD5Key = erlang:md5(term_to_binary(Key)),
-    forwardQueryToMCD(From, Ring, Filter, MD5Key, Q).
+    forwardQueryToMCD(From, Mod, Dispatcher, Filter, MD5Key, Q).
 
-forwardQueryToMCD(From, Ring, Filter, MD5Key, Q) ->
+forwardQueryToMCD(From, Mod, Dispatcher, Filter, MD5Key, Q) ->
     NodeList = case MD5Key of
-        <<>> -> dht_ring:nodes(Ring);
-        Bin -> dht_ring:lookup(Ring, Bin)
+        <<>> -> Mod:nodes(Dispatcher);
+        Bin -> Mod:lookup(Dispatcher, Bin)
     end,
     Reply = call_nodes(NodeList, Filter, Q),
     case From of
