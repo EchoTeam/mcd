@@ -10,10 +10,10 @@
 ]).
 
 wait_connection(Pid) ->
-    wait_connection(Pid, now(), 5000).
+    wait_connection(Pid, erlang:timestamp(), 5000).
 
 wait_connection(Pid, Started, Timeout) ->
-    case {mcd:version(Pid), Timeout - (timer:now_diff(now(), Started) div 1000)} of
+    case {mcd:version(Pid), Timeout - (timer:now_diff(erlang:timestamp(), Started) div 1000)} of
         {{ok, [_ | _]}, _} ->
             ok;
         {Error, WaitMore} when WaitMore =< 0 ->
