@@ -6,7 +6,8 @@
   {applications, [
                   kernel,
                   stdlib,
-                  dht_ring
+                  dht_ring,
+                  lager
                  ]},
   {mod, { mcd_app, []}},
   {env, []}
