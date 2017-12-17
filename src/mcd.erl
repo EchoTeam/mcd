@@ -1,4 +1,4 @@
-%%% 
+%%%
 %%% This module uses memcached protocol to interface memcached daemon:
 %%% http://code.sixapart.com/svn/memcached/trunk/server/doc/protocol.txt
 %%%
@@ -44,7 +44,7 @@
 %%%   Value: int()>=0
 %%%   Time: int()>=0
 %%%   Reason: noconn | notfound | notstored | overload | timeout | noproc | all_nodes_down
-%%% 
+%%%
 -module(mcd).
 -behavior(gen_server).
 
@@ -317,7 +317,7 @@ unload_connection(ServerRef) ->
 % gen_server callbacks
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
--record(state, { 
+-record(state, {
 	address, port = 11211, socket = nosocket,
 	receiver,		% data receiver process
 	requests = 0,		% client requests received
@@ -549,7 +549,7 @@ reconnect(#state{address = Address, port = Port, socket = OldSock} = State) ->
 
 	NewAnomalies = case is_atom(State#state.status) of
 		false -> State#state.anomalies;
-		true -> 
+		true ->
 			reportEvent(State, state, down),
 			incrAnomaly(State#state.anomalies, reconnects)
 	end,
@@ -563,7 +563,7 @@ compute_next_reconnect_delay(#state{status = Status}) ->
 	ComputeReconnectDelay = fun(Since) ->
 		% Wait increasingly longer,
 		% but no longer than 5 minutes.
-		case (utime(now()) - utime(Since)) of
+		case (utime(erlang:timestamp()) - utime(Since)) of
 			N when N > 300 -> 300 * 1000;
 			N -> N * 1000
 		end
@@ -572,7 +572,7 @@ compute_next_reconnect_delay(#state{status = Status}) ->
 		{connecting, Since, _} -> {Since, ComputeReconnectDelay(Since)};
 		{testing, Since} -> {Since, ComputeReconnectDelay(Since)};
 		{wait, Since} -> {Since, ComputeReconnectDelay(Since)};
-		_ -> {now(), 1000}
+		_ -> {erlang:timestamp(), 1000}
 	end.
 
 reconnector_process(MCDServerPid, Address, Port) ->
@@ -807,4 +807,3 @@ data_receiver_error_reason(<<"CLIENT_ERROR ", Reason/binary>>) ->
 
 data_receiver_error_reason(Code, Reason) ->
 	{error, {Code, [C || C <- binary_to_list(Reason), C >= $ ]}}.
-

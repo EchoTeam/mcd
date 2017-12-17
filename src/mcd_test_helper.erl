@@ -10,10 +10,11 @@
 ]).
 
 wait_connection(Pid) ->
-    wait_connection(Pid, now(), 5000).
+    wait_connection(Pid, erlang:monotonic_time(), 5000).
 
 wait_connection(Pid, Started, Timeout) ->
-    case {mcd:version(Pid), Timeout - (timer:now_diff(now(), Started) div 1000)} of
+    Diff = erlang:convert_time_unit(erlang:monotonic_time() - Started, native, milli_seconds),
+    case {mcd:version(Pid), Timeout - Diff} of
         {{ok, [_ | _]}, _} ->
             ok;
         {Error, WaitMore} when WaitMore =< 0 ->

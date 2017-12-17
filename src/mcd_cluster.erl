@@ -169,35 +169,35 @@ terminate(_Reason, _State) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 log_problems(Node, Command, Start, Res) ->
-    Threshold = 1000000, % 1 sec
-    Diff = timer:now_diff(now(), Start),
+    Now = erlang:monotonic_time(),
+    Diff = erlang:convert_time_unit(Now - Start, native, milli_seconds),
     ShouldLog = case {Diff, Res} of
-        {T,_}  when T > Threshold -> true;
+        {T,_}  when T > 1000 -> true;
         {_, {exception, _}} -> true;
         _ -> false
     end,
-    case ShouldLog of 
+    case ShouldLog of
         true ->
             MD5 = case Command of
                 {'$constructed_query', M, _} -> M;
                 _ -> Command
             end,
-            lager:warning([{tag, mcd_long_response}], 
-                "Request took more than ~pms or exception caught: ~n"
+            lager:warning([{tag, mcd_long_response}],
+                "Request took more than 1000ms or exception caught: ~n"
                 "Node:~p~n"
                 "MD5:~p~n"
                 "Res:~p~n"
-                "Time:~pms~n", [Threshold div 1000, Node, MD5, Res, Diff div 1000]);
+                "Time:~pms~n", [Node, MD5, Res, Diff div 1000]);
         _ -> nop
     end.
 
 call_node({_Name, ServerRef}=Node, Command) ->
-    Start = now(),
+    Start = erlang:monotonic_time(),
     try gen_server:call(ServerRef, Command) of
-        Res -> 
+        Res ->
             log_problems(Node, Command, Start, Res),
             Res
-    catch C:R -> 
+    catch C:R ->
         log_problems(Node, Command, Start, {exception, {C,R}}),
         erlang:raise(C, R, erlang:get_stacktrace())
     end.
